@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>活動記録 - 週報自動生成機能付</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --main: #4f46e5; --sub: #f59e0b; --bg: #f3f4f6; --success: #10b981; }
+        body { font-family: sans-serif; background: var(--bg); margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; }
+        .card { background: white; padding: 15px; border-radius: 16px; width: 100%; max-width: 450px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 15px; box-sizing: border-box; }
+        h2 { font-size: 1rem; color: #4b5563; margin-top: 0; border-left: 4px solid var(--main); padding-left: 8px; }
+        input, select, button { width: 100%; height: 45px; margin-top: 8px; border-radius: 10px; border: 1px solid #d1d5db; font-size: 16px; box-sizing: border-box; }
+        button { background: var(--main); color: white; border: none; font-weight: bold; cursor: pointer; }
+        .btn-line { background: #06C755; }
+        .btn-report { background: var(--sub); }
+        .weekly-report { background: #fffbeb; border: 2px solid var(--sub); padding: 15px; border-radius: 12px; margin-top: 10px; display: none; }
+        .report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; font-size: 0.9rem; }
+        .log-item { border-bottom: 1px solid #f3f4f6; padding: 10px 0; }
+        .tag-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+        .tag { background: #e5e7eb; padding: 5px 10px; border-radius: 20px; font-size: 11px; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>活動メニュー設定</h2>
+    <div style="display: flex; gap: 5px;">
+        <input type="text" id="new_act_name" placeholder="活動名を追加">
+        <button onclick="addMenu()" style="width: 60px; background: var(--success);">＋</button>
+    </div>
+    <div id="menuTags" class="tag-list"></div>
+</div>
+
+<div class="card">
+    <h2 id="title">記録する</h2>
+    <input type="datetime-local" id="f_date">
+    <select id="f_act"></select>
+    <input type="text" id="f_memo" placeholder="状況や考えをメモ">
+    <div style="margin-top:10px; font-size:0.9rem;">気分: <span id="m_val">50</span>点</div>
+    <input type="range" id="f_mood" min="0" max="100" value="50" oninput="document.getElementById('m_val').innerText=this.value">
+    <button onclick="onSave()">保存する</button>
+    <button onclick="shareToSupporter()" class="btn-line">今日の報告をLINE送信</button>
+    <button onclick="generateWeeklyReport()" class="btn-report">週報（直近7日間）を作成</button>
+</div>
+
+<div id="weeklyReportArea" class="card weekly-report">
+    <h2 style="border-color: var(--sub);">週間振り返りレポート</h2>
+    <div id="reportContent"></div>
+    <button onclick="window.print()" style="background:#4a5568; margin-top:10px;">レポートを印刷/保存</button>
+</div>
+
+<div class="card">
+    <div style="height: 200px;"><canvas id="myChart"></canvas></div>
+</div>
+
+<div class="card">
+    <h2>履歴</h2>
+    <div id="logList"></div>
+</div>
+
+<script>
+    let db = JSON.parse(localStorage.getItem('rework_db_v3')) || [];
+    let menu = JSON.parse(localStorage.getItem('rework_menu')) || ["休息", "仕事", "外出"];
+    let editingId = null;
+    let chart;
+
+    window.onload = () => {
+        updateMenuUI();
+        resetForm();
+        initChart();
+        draw();
+    };
+
+    function updateMenuUI() {
+        document.getElementById('f_act').innerHTML = menu.map(m => `<option value="${m}">${m}</option>`).join('');
+        document.getElementById('menuTags').innerHTML = menu.map(m => `<div class="tag">${m} <span onclick="removeMenu('${m}')" style="cursor:pointer;color:red">×</span></div>`).join('');
+    }
+
+    function addMenu() {
+        const name = document.getElementById('new_act_name').value.trim();
+        if(name && !menu.includes(name)) {
+            menu.push(name);
+            localStorage.setItem('rework_menu', JSON.stringify(menu));
+            document.getElementById('new_act_name').value = "";
+            updateMenuUI();
+        }
+    }
+
+    function removeMenu(name) {
+        if(confirm("削除しますか？")) {
+            menu = menu.filter(m => m !== name);
+            localStorage.setItem('rework_menu', JSON.stringify(menu));
+            updateMenuUI();
+        }
+    }
+
+    function resetForm() {
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        document.getElementById('f_date').value = now.toISOString().slice(0, 16);
+        document.getElementById('f_memo').value = "";
+        editingId = null;
+    }
+
+    function onSave() {
+        const dateVal = document.getElementById('f_date').value;
+        const actVal = document.getElementById('f_act').value;
+        const moodVal = parseInt(document.getElementById('f_mood').value);
+        const memoVal = document.getElementById('f_memo').value;
+
+        const record = { id: dateVal, date: dateVal, act: actVal, mood: moodVal, memo: memoVal };
+        if(editingId) db = db.filter(item => item.id !== editingId);
+        db.push(record);
+        db.sort((a, b) => new Date(a.date) - new Date(b.date));
+        localStorage.setItem('rework_db_v3', JSON.stringify(db));
+        resetForm();
+        draw();
+    }
+
+    function generateWeeklyReport() {
+        const last7Days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const weekData = db.filter(r => new Date(r.date) >= last7Days);
+
+        if(weekData.length === 0) return alert("データが足りません");
+
+        // 1. 基本集計
+        const scores = weekData.map(r => r.mood);
+        const avg = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
+        const maxScore = Math.max(...scores);
+        const minScore = Math.min(...scores);
+        
+        // 2. 最高点・最低点の詳細を抽出
+        const bestRecords = weekData.filter(r => r.mood === maxScore);
+        const worstRecords = weekData.filter(r => r.mood === minScore);
+
+        // 3. メモの要約（キーワード抽出と傾向）
+        const allMemos = weekData.map(r => r.memo).filter(m => m !== "").join(" ");
+        let summaryText = "";
+        if (allMemos) {
+            // 簡易的な傾向分析（文字数や内容から推測）
+            summaryText = `今週のメモには「${allMemos.slice(0, 50)}...」といった内容が含まれており、`;
+            summaryText += avg > 60 ? "全体的に前向きな振り返りが多い傾向です。" : "少し慎重な振り返りが必要な時期かもしれません。";
+        } else {
+            summaryText = "今週はメモの記載が少なめでした。";
+        }
+
+        const area = document.getElementById('weeklyReportArea');
+        const content = document.getElementById('reportContent');
+        
+        area.style.display = 'block';
+        content.innerHTML = `
+            <div class="report-grid" style="grid-template-columns: 1fr;">
+                <div style="background:#e0e7ff; padding:10px; border-radius:8px;">
+                    <strong>📊 今週の平均気分: ${avg}点</strong>
+                </div>
+                
+                <div style="border: 1px solid #10b981; padding:10px; border-radius:8px;">
+                    <strong style="color:#10b981;">✨ 最高点（${maxScore}点）の時の活動:</strong><br>
+                    ${bestRecords.map(r => `・${r.act} (${r.date.slice(5, 10).replace('-','/')})`).join('<br>')}
+                </div>
+
+                <div style="border: 1px solid #ef4444; padding:10px; border-radius:8px;">
+                    <strong style="color:#ef4444;">⚠️ 最低点（${minScore}点）の時の活動:</strong><br>
+                    ${worstRecords.map(r => `・${r.act} (${r.date.slice(5, 10).replace('-','/')})<br><small>└メモ: ${r.memo || 'なし'}</small>`).join('<br>')}
+                </div>
+
+                <div style="background:#f3f4f6; padding:10px; border-radius:8px; font-size:0.85rem;">
+                    <strong>📝 今週の振り返り要約:</strong><br>
+                    ${summaryText}
+                </div>
+            </div>
+        `;
+        window.scrollTo(0, area.offsetTop);
+    }
+
+    function draw() {
+        // アイコンを重ねる処理（簡易版：ラベルに活動名を入れる）
+        chart.data.labels = db.map(item => item.date.slice(11) + " " + item.act.slice(0,1));
+        chart.data.datasets[0].data = db.map(item => item.mood);
+        chart.update();
+
+        const list = document.getElementById('logList');
+        list.innerHTML = db.slice().reverse().map(item => `
+            <div class="log-item">
+                <small>${item.date.replace('T',' ')}</small> <strong>${item.act}</strong> (${item.mood}点)<br>
+                <small>${item.memo || ""}</small>
+            </div>
+        `).join('');
+    }
+
+    function initChart() {
+        const ctx = document.getElementById('myChart').getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: '気分', data: [], borderColor: '#4f46e5', tension: 0.3, pointStyle: 'circle', pointRadius: 5 }] },
+            options: { responsive: true, maintainAspectRatio: false }
+        });
+    }
+
+    function shareToSupporter() {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const todaysLogs = db.filter(r => r.date.startsWith(todayStr));
+        if (todaysLogs.length === 0) return alert("記録がありません");
+        
+        let msg = `【リワーク報告：${todayStr}】\n`;
+        todaysLogs.forEach(r => msg += `・${r.date.slice(11)} ${r.act} (${r.mood}点) ${r.memo}\n`);
+        window.location.href = `https://line.me/R/msg/text/?${encodeURIComponent(msg)}`;
+    }
+</script>
+</body>
+</html>
